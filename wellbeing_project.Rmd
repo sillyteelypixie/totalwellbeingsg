@@ -1,0 +1,448 @@
+---
+title: "Comprehensive Health and Well-Being Study Among Singaporean Seniors"
+author: "Krystle Teo"
+date: "2024-08-08"
+output: html_document
+---
+
+## Introduction:
+This script is designed to analyze the impact of a 10-week holistic health program on various health constructs among seniors in Singapore. The script performs data pre-processing, creates an SQLite database, executes SQL queries,and conducts statistical analyses to explore the relationships between different health constructs/ outcome measures. The results are visualized and documented for further interpretation.
+
+## Instructions:
+- Ensure that the necessary R packages listed below are installed.
+- Set the working directory to the folder containing your data files and SQLite database using setwd().
+- Run the entire script to preprocess data, create the SQLite database, and perform analyses.
+
+## Set-up environment and load packages needed
+First load the necessary libraries and scripts.
+
+### Set the working directory to the location of your data files
+```{r}
+setwd("/Users/krystle/Documents/PSYCH755/final_project")  # <<<< CHANGE THIS TO YOUR OWN DIRECTORY PATH
+```
+
+### Set up conflict policies 
+```{r}
+options(conflicts.policy = "depends.ok")
+devtools::source_url("https://github.com/jjcurtin/lab_support/blob/main/fun_ml.R?raw=true")
+tidymodels_conflictRules()
+
+```
+
+### Load packages needed
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, echo = TRUE)
+library(RSQLite)
+library(dplyr)
+library(DBI)
+library(tidyverse)
+```
+
+### Source scripts 
+```{r}
+devtools::source_url("https://github.com/jjcurtin/lab_support/blob/main/fun_eda.R?raw=true")
+devtools::source_url("https://github.com/jjcurtin/lab_support/blob/main/fun_plots.R?raw=true")
+```
+
+## Data pre-processing
+In this section, load the CSV files containing the raw data and perform necessary data cleaning operations.
+
+### Load csv files
+```{r}
+d1 <- read_csv("2023_SHAPESG_Data_TP1.csv")
+d2 <- read_csv("2023_SHAPESG_Data_TP2.csv")
+```
+
+### Pre-processing and cleaning of datasets
+```{r}
+d1_clean <- d1 |> 
+  mutate(across(where(is.character), ~ na_if(., "#DIV/0!"))) # Replace "#DIV/0!" with NA in all character columns
+
+# Check for list of shapesg_id with all values as NA
+na_rows_d1 <- d1_clean |> 
+  filter(if_all(-SHAPESG_ID, is.na)) |> 
+  pull(SHAPESG_ID)
+
+# Remove NA rows and clean column names
+d1_clean <- d1_clean |> 
+  filter(!SHAPESG_ID %in% na_rows_d1) |> 
+  janitor::clean_names() 
+
+# Repeat same cleaning process for d2 df
+d2_clean <- d2 |> 
+  mutate(across(where(is.character), ~ na_if(., "#DIV/0!"))) # replace "#DIV/0!" with NA in all character columns
+
+na_rows_d2 <- d2_clean |> 
+  filter(if_all(-SHAPESG_ID, is.na)) |> 
+  pull(SHAPESG_ID)
+
+d2_clean <- d2_clean |> 
+  filter(!SHAPESG_ID %in% na_rows_d2) |> 
+  janitor::clean_names()
+```
+Both datasets were first modified to replace instances of "#DIV/0!" with NA in all character columns, effectively handling invalid entries. Following this, rows where all columns (except SHAPESG_ID) contained NA values were identified and removed, ensuring that only rows with meaningful data were retained. The column names were then standardized using janitor::clean_names(), making them more consistent and easier to work with. 
+
+## Create new SQLite database using R
+The database will be created in the current working directory.
+
+### Connect to SQLite database
+```{r}
+db_file <- "wellbeing_database.sqlite"  
+conn <- dbConnect(RSQLite::SQLite(), dbname = db_file)
+```
+
+### Write the cleaned data files to the SQLite database
+```{r}
+dbWriteTable(conn, "tp1", d1_clean, overwrite = TRUE)
+dbWriteTable(conn, "tp2", d2_clean, overwrite = TRUE)
+```
+
+### List tables to confirm
+```{r}
+dbListTables(conn)
+
+```
+
+## Querying data
+Now we can start querying some data from the tables.
+
+### Querying 'tp1' table
+```{r}
+tp1 <- tbl(conn, "tp1")
+
+count_tp1 <- tp1 |> 
+  summarise(count_tp1 = n_distinct(shapesg_id)) |> 
+  print()
+
+show_query(count_tp1)
+```
+
+### Querying 'tp2' table
+```{r}
+tp2 <- tbl(conn, "tp2")
+
+count_tp2 <- tp2 |> 
+  summarise(count_tp2 = n_distinct(shapesg_id)) |> 
+  print()
+
+show_query(count_tp2)
+
+```
+
+### Querying sleep
+Let us analyze sleep quality before and after the program.
+```{r}
+# Queries to sum sleep scores
+query_sleep_sum_tp1 <- "
+  SELECT shapesg_id, 
+         (gsq1_01 + gsq1_02 + gsq1_03 + gsq1_04 + gsq1_05 + gsq1_06) AS total_sleep_score_tp1
+  FROM tp1
+"
+  
+sleep_scores_tp1 <- dbGetQuery(conn, query_sleep_sum_tp1)
+sleep_scores_tp1 
+
+query_sleep_sum_tp2 <- "
+  SELECT shapesg_id, 
+         (gsq2_01 + gsq2_02 + gsq2_03 + gsq2_04 + gsq2_05 + gsq2_06) AS total_sleep_score_tp2
+  FROM tp2
+"
+  
+sleep_scores_tp2 <- dbGetQuery(conn, query_sleep_sum_tp2)
+sleep_scores_tp2
+
+# Merge results
+sleep_scores <- merge(sleep_scores_tp1, sleep_scores_tp2, by = "shapesg_id", all = TRUE)
+
+# Calculate summary statistics for sleep scores in tp1 and tp2 
+sleep_summary_tp1 <- summary(sleep_scores$total_sleep_score_tp1)
+sleep_summary_tp2 <- summary(sleep_scores$total_sleep_score_tp2)
+
+# Create a union of all possible statistic names
+sleep_all_stats <- union(names(sleep_summary_tp1), names(sleep_summary_tp2))
+
+# Align summaries by filling missing statistics with NA
+sleep_summary_tp1 <- as.vector(sleep_summary_tp1[sleep_all_stats])
+sleep_summary_tp2 <- as.vector(sleep_summary_tp2[sleep_all_stats])
+
+# Create a data frame with the aligned summaries
+sleep_summary_stats <- data.frame(
+  Statistic = sleep_all_stats,
+  TP1 = sleep_summary_tp1,
+  TP2 = sleep_summary_tp2
+) |> 
+  print()
+
+```
+*Note that lower score indicates better sleep quality.*
+
+```{r}
+# Reshape data for ggplot
+sleep_scores_long <- sleep_scores %>%
+  pivot_longer(cols = starts_with("total_sleep_score"), 
+               names_to = "time_point", 
+               values_to = "sleep_score")
+
+# Create boxplot
+sleep_change <- 
+  ggplot(sleep_scores_long, aes(x = time_point, y = sleep_score, fill = time_point)) +
+  geom_boxplot() +
+  labs(title = "Comparison of Sleep Scores Between TP1 and TP2",
+       x = "Time Point",
+       y = "Total Sleep Score") +
+  theme_minimal()
+
+sleep_change
+```
+
+### Querying BMI
+```{r}
+# Query BMI from tp1 and tp2, joining on shapesg_id
+query_BMI <- "
+  SELECT tp1.shapesg_id, 
+         tp1.bmi1 AS bmi_tp1,
+         tp2.bmi2 AS bmi_tp2
+  FROM tp1
+  JOIN tp2
+  ON tp1.shapesg_id = tp2.shapesg_id
+"
+bmi_data <- dbGetQuery(conn, query_BMI)
+bmi_data
+```
+
+```{r}
+# Ensure that bmi_tp1 and bmi_tp2 are numeric
+bmi_data$bmi_tp1 <- as.numeric(bmi_data$bmi_tp1)
+bmi_data$bmi_tp2 <- as.numeric(bmi_data$bmi_tp2)
+
+# Calculate mean BMI for each time point
+mean_bmi_tp1 <- mean(bmi_data$bmi_tp1, na.rm = TRUE) |> print()
+mean_bmi_tp2 <- mean(bmi_data$bmi_tp2, na.rm = TRUE) |> print()
+
+```
+
+```{r}
+# Reshape data for proper plotting
+bmi_data_long <- bmi_data %>%
+  pivot_longer(cols = c(bmi_tp1, bmi_tp2), names_to = "time_point", values_to = "BMI")
+
+# Plot side-by-side boxplots for TP1 and TP2
+bmi_change <- 
+  ggplot(bmi_data_long, aes(x = time_point, y = BMI, fill = time_point)) +
+  geom_boxplot() +
+  labs(title = "Comparison of BMI at TP1 and TP2",
+       x = "Time Points",
+       y = "BMI") +
+  theme_minimal()
+bmi_change
+```
+
+### Querying waist-hip ratio (WHR)
+```{r}
+# Query WHR from tp1 and tp2, joining on shapesg_id
+query_WHR <- "
+  SELECT tp1.shapesg_id, 
+         tp1.whr1 AS whr_tp1,
+         tp2.whr2 AS whr_tp2
+  FROM tp1
+  JOIN tp2
+  ON tp1.shapesg_id = tp2.shapesg_id
+"
+whr_data <- dbGetQuery(conn, query_WHR)
+
+# Print the queried data
+print(whr_data)
+```
+
+
+```{r}
+# Convert WHR columns to numeric 
+whr_data$whr_tp1 <- as.numeric(whr_data$whr_tp1)
+whr_data$whr_tp2 <- as.numeric(whr_data$whr_tp2)
+
+
+# Calculate mean WHR for each time point
+mean_whr_tp1 <- mean(whr_data$whr_tp1, na.rm = TRUE) |> print()
+mean_whr_tp2 <- mean(whr_data$whr_tp2, na.rm = TRUE) |> print()
+
+# Perform a paired t-test to compare WHR between TP1 and TP2
+t_test_whr <- t.test(whr_data$whr_tp1, whr_data$whr_tp2, paired = TRUE)
+print(t_test_whr)
+
+# Visualize the comparison using a boxplot
+whr_data_long <- whr_data %>%
+  pivot_longer(cols = c(whr_tp1, whr_tp2), names_to = "time_point", values_to = "WHR")
+
+whr_change <- 
+  ggplot(whr_data_long, aes(x = time_point, y = WHR, fill = time_point)) +
+  geom_boxplot() +
+  labs(title = "Comparison of WHR at TP1 and TP2",
+       x = "Time Points",
+       y = "Waist-Hip Ratio (WHR)") +
+  theme_minimal()
+
+whr_change
+```
+### Querying waist-hip ratio (WHR) by gender
+```{r}
+query_gender <- "
+  SELECT shapesg_id, gender
+  FROM tp1
+"
+
+# Retrieve gender information
+gender_data <- dbGetQuery(conn, query_gender)
+
+# Join gender data with existing whr_data
+whr_data <- merge(whr_data, gender_data, by = "shapesg_id", all.x = TRUE)
+
+# View the updated data with gender included
+print(whr_data)
+
+```
+
+#### Investigate gender differences 
+```{r}
+whr_data$gender <- as.factor(whr_data$gender)  # Convert gender to a factor for easier analysis
+
+# Split the data by gender
+whr_data_male <- whr_data |>  filter(gender == "1")  # Male
+whr_data_female <- whr_data |>  filter(gender == "2")  # Female
+
+# Calculate mean WHR for each gender and time point
+mean_whr_tp1_male <- mean(whr_data_male$whr_tp1, na.rm = TRUE) |> print()
+mean_whr_tp2_male <- mean(whr_data_male$whr_tp2, na.rm = TRUE) |> print()
+mean_whr_tp1_female <- mean(whr_data_female$whr_tp1, na.rm = TRUE) |> print()
+mean_whr_tp2_female <- mean(whr_data_female$whr_tp2, na.rm = TRUE) |> print()
+
+# Perform paired t-tests by gender
+t_test_whr_male <- t.test(whr_data_male$whr_tp1, whr_data_male$whr_tp2, paired = TRUE)
+t_test_whr_female <- t.test(whr_data_female$whr_tp1, whr_data_female$whr_tp2, paired = TRUE)
+
+t_test_whr_male
+t_test_whr_female
+
+# Visualize the comparison using a boxplot, grouped by gender
+# Reshape data for proper plotting
+whr_data_long <- whr_data %>%
+  pivot_longer(cols = c(whr_tp1, whr_tp2), names_to = "time_point", values_to = "WHR")
+
+whr_change_gender <- 
+  ggplot(whr_data_long, aes(x = time_point, y = WHR, fill = gender)) +
+  geom_boxplot() +
+  facet_wrap(~ gender, scales = "free", labeller = as_labeller(c(`1` = "Male", `2` = "Female"))) +
+  labs(title = "Comparison of WHR at TP1 and TP2 by Gender",
+       x = "Time Points",
+       y = "Waist-Hip Ratio (WHR)") +
+  theme_minimal()
+
+whr_change_gender
+```
+
+### Querying self-rated health
+```{r}
+# Querying self-rated health scores in tp1
+query_SRHealth_tp1 <- "
+  SELECT shapesg_id, 
+         sr_health1 AS sr_health_tp1
+  FROM tp1
+"
+SRHealth_scores_tp1 <- dbGetQuery(conn, query_SRHealth_tp1)
+
+# Querying self-rated health scores in tp2
+query_SRHealth_tp2 <- "
+  SELECT shapesg_id, 
+         sr_health2 AS sr_health_tp2
+  FROM tp2
+"
+SRHealth_scores_tp2 <- dbGetQuery(conn, query_SRHealth_tp2)
+
+# Change in self-rated health scores between tp1 and tp2
+query_change_SRHealth <- "
+  SELECT tp1.shapesg_id, 
+         tp1.sr_health_tp1,
+         tp2.sr_health_tp2,
+         (tp2.sr_health_tp2 - tp1.sr_health_tp1) AS change_in_sr_health
+  FROM (
+      SELECT shapesg_id, 
+             sr_health1 AS sr_health_tp1
+      FROM tp1
+  ) AS tp1
+  JOIN (
+      SELECT shapesg_id, 
+             sr_health2 AS sr_health_tp2
+      FROM tp2
+  ) AS tp2
+  ON tp1.shapesg_id = tp2.shapesg_id
+"
+change_SRHealth_scores <- dbGetQuery(conn, query_change_SRHealth)
+
+print(change_SRHealth_scores)
+```
+
+```{r}
+# Perform paired t-test
+t_test_srh <- t.test(change_SRHealth_scores$sr_health_tp1, change_SRHealth_scores$sr_health_tp2, paired = TRUE)
+t_test_srh
+
+# Summary statistics
+summary_stats_srh <- change_SRHealth_scores %>%
+  summarise(
+    mean_sr_health_tp1 = mean(sr_health_tp1, na.rm = TRUE),
+    mean_sr_health_tp2 = mean(sr_health_tp2, na.rm = TRUE),
+    mean_change_in_sr_health = mean(change_in_sr_health, na.rm = TRUE),
+    sd_sr_health_tp1 = sd(sr_health_tp1, na.rm = TRUE),
+    sd_sr_health_tp2 = sd(sr_health_tp2, na.rm = TRUE),
+    sd_change_in_sr_health = sd(change_in_sr_health, na.rm = TRUE)
+  ) |> 
+  print()
+
+
+```
+
+## Further analysis and modeling
+### Exploration of well-being as a multi-dimensional construct
+```{r}
+df_1 <- d1_clean %>%
+  mutate(
+    hr1_tot = rowSums(across(hr1_01:hr1_06), na.rm = TRUE),
+    coping_tot = rowSums(across(cope1_01:cope1_04), na.rm = TRUE),
+    cog_tot = rowSums(across(cog_iw1_01:cog_iw1_10), na.rm = TRUE),
+    med_tot = rowSums(across(medical1_01:medical1_17), na.rm = TRUE)
+    ) |> 
+  mutate(across(-shapesg_id, as.numeric))
+
+
+# Correlation matrix
+correlation_matrix <- cor(df_1 |> select(mo_ca1, gds1, bmi1, whr1, cog_tot, hr1_tot, coping_tot, med_tot), use = "pairwise.complete.obs")
+
+print(correlation_matrix)
+
+```
+### Modeling cognitive performance using linear regression 
+```{r}
+# Linear regression to predict MOCA scores
+linear_model <- lm(mo_ca1 ~ gds1 + bmi1 + whr1 + cog_tot + hr1_tot + coping_tot, data = df_1)
+summary(linear_model)
+anova(linear_model)
+# Check residuals
+plot(linear_model)
+```
+
+```{r}
+# Adding covariates
+linear_model_1 <- lm(mo_ca1 ~ gds1 + bmi1 + whr1 + cog_tot + hr1_tot + coping_tot + age + gender + edu_level + med_tot, data = df_1)
+summary(linear_model_1)
+```
+
+### Modeling self-rated health using linear regression 
+```{r}
+linear_model_srhealth <- lm(sr_health1 ~ gds1 + bmi1 + whr1 + cog_tot + hr1_tot + coping_tot 
+                            + age + gender + edu_level + med_tot, data = df_1)
+summary(linear_model_srhealth)
+```
+## Close the connection
+Finally, we close the connection to the database.
+```{r}
+dbDisconnect(conn)
+```
